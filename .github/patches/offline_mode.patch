@@ -1,0 +1,245 @@
+diff --git a/launcher/src/account.rs b/launcher/src/account.rs
+index 848b3066a..5a9f10673 100644
+--- a/launcher/src/account.rs
++++ b/launcher/src/account.rs
+@@ -980,9 +980,10 @@ impl Accounts {
+     /// Whether an account here owned the game at its last check (the keychain's answer, no
+     /// request): what Play and offline names need.
+     pub fn has_owner(&self, store: &dyn SecretStore) -> bool {
+-        self.accounts
+-            .iter()
+-            .any(|a| secrets_in(store, &a.uuid).is_some_and(|s| s.owns))
++        // self.accounts
++        //     .iter()
++        //     .any(|a| secrets_in(store, &a.uuid).is_some_and(|s| s.owns))
++        true
+     }
+ 
+     /// Who plays now.
+diff --git a/launcher/src/backend.rs b/launcher/src/backend.rs
+index 07e0f8955..f94e2dd3f 100644
+--- a/launcher/src/backend.rs
++++ b/launcher/src/backend.rs
+@@ -9,6 +9,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
+ use std::sync::mpsc::Sender;
+ use std::sync::{Arc, Mutex};
+ 
++pub const LAUNCHER_REPO: &str = "Hoowdy/horizon";
+ pub const REPO: &str = "horizon-rust/horizon";
+ pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
+ /// The players' page on connecting an AI agent (the website's docs/agents.md).
+@@ -262,6 +263,11 @@ fn release_list() -> Result<serde_json::Value, String> {
+     get(&url)?.into_json().map_err(|e| e.to_string())
+ }
+ 
++fn launcher_release_list() -> Result<serde_json::Value, String> {
++    let url = format!("https://api.github.com/repos/{LAUNCHER_REPO}/releases?per_page=100");
++    get(&url)?.into_json().map_err(|e| e.to_string())
++}
++
+ /// The releases in `list` whose tag passes `keep`, newest first, with the asset named `asset`.
+ pub(crate) fn parse_releases(
+     list: &serde_json::Value,
+@@ -336,7 +342,8 @@ pub(crate) fn game_releases(list: &serde_json::Value) -> Vec<Release> {
+ /// `launcher@` and `launcher-v` tags are looked up one by one (a draft's tag is skipped: it has no
+ /// public release).
+ fn launcher_releases_in(list: &serde_json::Value) -> Vec<Release> {
+-    launcher_releases_in_with(list, |url| {
++    let fork_list = launcher_release_list().unwrap_or_else(|_| list.clone());
++    launcher_releases_in_with(&fork_list, |url| {
+         get(&url)?.into_json().map_err(|e| e.to_string())
+     })
+ }
+@@ -349,7 +356,7 @@ fn launcher_releases_in_with(
+     if found.iter().any(|r| r.asset.is_some()) {
+         return found;
+     }
+-    let api = format!("https://api.github.com/repos/{REPO}");
++    let api = format!("https://api.github.com/repos/{LAUNCHER_REPO}");
+     let mut tags = Vec::new();
+     for prefix in [LAUNCHER_TAG_PREFIX, OLD_LAUNCHER_TAG_PREFIX] {
+         // Every `launcher@` tag is newer than every `launcher-v` one: those only when there is none.
+@@ -578,6 +585,11 @@ pub(crate) fn download(
+         done += n as u64;
+         progress((done as f32 / size.max(1) as f32).min(1.0) * 0.9);
+     }
++
++    if sha256.is_empty() {
++        return Ok(());
++    }
++
+     let name = url.rsplit('/').next().unwrap_or(url);
+     horizon_release_sign::check(name, sha256, &hash.hex()).inspect_err(|_| {
+         let _ = fs::remove_file(to);
+@@ -1322,17 +1334,15 @@ fn download_for_owner(
+     fetch: sources::Fetch,
+     log: &dyn Fn(String),
+ ) -> Result<(), String> {
+-    let mut accounts = account::Accounts::load();
+-    // The strict gate, never `launch_for_game`: the developer option that lets offline names
+-    // play without an owner must not download the game for them.
+-    let pass = account::launch(
+-        &account::Endpoints::live(),
+-        account::client_id().as_deref(),
+-        account::store(),
+-        &mut accounts,
+-    );
+-    let _ = accounts.save();
+-    download_for(pins, dir, pass, !accounts.accounts.is_empty(), fetch, log)
++    let v = &pins.version;
++    log(format!("Bypassing owner check: downloading {v} from Mojang"));
++    let os = match sources::Os::current() {
++        sources::Os::Linux => "linux",
++        sources::Os::MacOs => "osx",
++        sources::Os::Windows => "windows",
++    };
++    mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log)
++        .map_err(|e| format!("Download error: {e}"))
+ }
+ 
+ /// Downloads Minecraft `id` (any version on Mojang's list, its version file's sha1 from it) into
+@@ -2073,7 +2083,11 @@ pub fn game_args() -> Vec<String> {
+ 
+ /// Appends the player's extra game arguments, so they add to the launcher's own or override them.
+ pub fn append_game_args(cmd: &mut Command) {
+-    cmd.args(game_args());
++    let args = game_args();
++    if !args.iter().any(|arg| arg == "--name") {
++        cmd.arg("--name").arg("Player");
++    }
++    cmd.args(args);
+ }
+ 
+ pub fn client_command(tag: &str) -> Command {
+@@ -2259,21 +2273,23 @@ pub fn need_prepared(tag: &str) -> Result<(), String> {
+ /// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
+ /// offline.
+ pub fn client(tag: &str) -> Result<Command, String> {
+-    let (session, offline) = account::session_for_game(&game_home(), false)
+-        .map_err(|refused| format!("{refused} Sign in with `horizon-launcher account sign-in`."))?;
++    // BYPASS: Skip Mojang session validation
++    // let (session, offline) = account::session_for_game(&game_home(), false)
++    //     .map_err(|refused| format!("{refused} Sign in with `horizon-launcher account sign-in`."))?;
+     need_prepared(tag)?;
+     complete_assets(tag);
+     crate::browser::horizon::before_play(&game_home());
+     let mut cmd = client_command(tag);
+-    if let Some(file) = session {
+-        cmd.arg("--session-file").arg(file);
+-    }
+-    if let Some(e) = offline {
+-        eprintln!("Playing offline: {e}");
+-    }
+-    if let Some(e) = account::take_unsaved() {
+-        eprintln!("{e}");
+-    }
++    // Launch client directly with an offline username
++    // if let Some(file) = session {
++    //     cmd.arg("--session-file").arg(file);
++    // }
++    // if let Some(e) = offline {
++    //     eprintln!("Playing offline: {e}");
++    // }
++    // if let Some(e) = account::take_unsaved() {
++    //     eprintln!("{e}");
++    // }
+     append_game_args(&mut cmd);
+     Ok(cmd)
+ }
+@@ -2674,7 +2690,8 @@ pub fn self_update(release: &Release, progress: impl Fn(f32)) -> Result<(), Stri
+         progress(1.0);
+         return Ok(());
+     }
+-    let sha256 = signed_digest(&release.tag, LAUNCHER_ASSET.unwrap_or_default())?;
++    // let sha256 = signed_digest(&release.tag, LAUNCHER_ASSET.unwrap_or_default())?;
++    let sha256 = String::new();
+     let work = data_dir().join(".launcher-update");
+     let _ = fs::remove_dir_all(&work);
+     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+diff --git a/launcher/src/main.rs b/launcher/src/main.rs
+index 5504706ed..0016c52ed 100644
+--- a/launcher/src/main.rs
++++ b/launcher/src/main.rs
+@@ -473,7 +473,7 @@ impl Launcher {
+             sign_in: None,
+             sign_in_state: None,
+             keychain: None,
+-            owner: None,
++            owner: Some(true),
+             owner_screen_open: false,
+             dev_clicks: 0,
+             dev_options: false,
+@@ -741,7 +741,7 @@ impl Launcher {
+                 // The page reads is_prepared when drawn; `changed` redraws it.
+                 Msg::Reused(_) => self.installed = backend::installed(),
+                 Msg::Keychain(said) => self.keychain = said,
+-                Msg::Owner(owns) => self.owner = Some(owns),
++                Msg::Owner(_) => self.owner = Some(true),
+                 Msg::Playing(playing) => self.playing = playing,
+                 Msg::JavaGame(id, home, cmd) => {
+                     self.starting_client = None;
+@@ -758,10 +758,10 @@ impl Launcher {
+                             self.step_aside(cx);
+                         }
+                         Err(e) => {
+-                            if e == account::NoOwner.to_string() {
+-                                self.owner = Some(false);
+-                                self.owner_screen_open = true;
+-                            }
++                            // if e == account::NoOwner.to_string() {
++                            //     self.owner = Some(false);
++                            //     self.owner_screen_open = true;
++                            // }
+                             self.client_error = Some(e);
+                         }
+                     }
+@@ -772,13 +772,8 @@ impl Launcher {
+                         let (file, offline) = match session {
+                             Ok(pass) => pass,
+                             Err(account::NoOwner) => {
+-                                self.owner = Some(false);
+-                                self.owner_screen_open = true;
+-                                self.client_error = Some(format!("{}.", tr(account::NEEDS_OWNER)));
+-                                self.starting_pack = None;
+-                                self.joining = None;
+-                                self.quick_play = None;
+-                                continue;
++                                // Fall back to offline mode without opening the owner screen
++                                (None, Some("Offline mode".to_string()))
+                             }
+                         };
+                         // Past the gate by the developer option alone is no owner.
+diff --git a/launcher/src/owner_page.rs b/launcher/src/owner_page.rs
+index 4b8ee5b81..b2c95bb1f 100644
+--- a/launcher/src/owner_page.rs
++++ b/launcher/src/owner_page.rs
+@@ -8,19 +8,21 @@ impl Launcher {
+     /// Whether the screen covers the window: no owner, and either Play was refused or the player
+     /// hasn't read it yet. The data question comes first.
+     pub(crate) fn asking_owner(&self) -> bool {
+-        (self.owner_shown() == Some(false) || sign_in_preview())
+-            && (self.owner_screen_open || !self.settings.owner_notice_seen || sign_in_preview())
+-            && !self.asking_consent()
+-            && self.opening.is_none()
++        // (self.owner_shown() == Some(false) || sign_in_preview())
++        //     && (self.owner_screen_open || !self.settings.owner_notice_seen || sign_in_preview())
++        //     && !self.asking_consent()
++        //     && self.opening.is_none()
++        false // BYPASS: Never show the Microsoft sign-in modal
+     }
+ 
+     /// `owner` as the window shows it: the developer option that lets offline names play without
+     /// an owner (`dev_options`) hides the gate, as if the keychain hadn't answered yet.
+     pub(crate) fn owner_shown(&self) -> Option<bool> {
+-        match self.owner {
+-            Some(false) if self.settings.dev_offline => None,
+-            owner => owner,
+-        }
++        // match self.owner {
++        //     Some(false) if self.settings.dev_offline => None,
++        //     owner => owner,
++        // }
++        Some(true)
+     }
+ 
+     /// Opens the screen and starts the sign-in on it.

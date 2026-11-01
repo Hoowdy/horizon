@@ -1,0 +1,103 @@
+name: Auto-Build Patched Launcher
+
+on:
+  schedule:
+    # Checks every 6 hours for new upstream launcher releases
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: 'Specific upstream tag to build (e.g., launcher@0.2.30) or empty for latest'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Check Out Automation & Patches
+        uses: actions/checkout@v4
+        with:
+          path: automation
+
+      - name: Determine Target Version
+        id: version_check
+        shell: pwsh
+        run: |
+          if ("${{ github.event.inputs.force_tag }}" -ne "") {
+            $targetTag = "${{ github.event.inputs.force_tag }}"
+          } else {
+            $upstreamReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/horizon-rust/horizon/releases?per_page=100"
+            $latestUpstream = $upstreamReleases | Where-Object { $_.tag_name -like "launcher@*" } | Select-Object -First 1
+            if (-not $latestUpstream) {
+              Write-Error "No upstream launcher release found."
+              exit 1
+            }
+            $targetTag = $latestUpstream.tag_name
+          }
+
+          Write-Host "Target upstream tag: $targetTag"
+
+          try {
+            $forkRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/Hoowdy/horizon/releases/tags/$targetTag"
+            Write-Host "Tag $targetTag already exists on fork. Skipping build."
+            echo "should_build=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          } catch {
+            Write-Host "Tag $targetTag not found on fork. Proceeding to build."
+          }
+
+          $rawVersion = $targetTag.Replace("launcher@", "")
+          echo "tag=$targetTag" >> $env:GITHUB_OUTPUT
+          echo "version=$rawVersion" >> $env:GITHUB_OUTPUT
+          echo "should_build=true" >> $env:GITHUB_OUTPUT
+
+      - name: Check Out Upstream Tag
+        if: steps.version_check.outputs.should_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: horizon-rust/horizon
+          ref: ${{ steps.version_check.outputs.tag }}
+          path: horizon
+
+      - name: Apply Offline Patch
+        if: steps.version_check.outputs.should_build == 'true'
+        working-directory: horizon
+        shell: bash
+        run: |
+          git apply ../automation/.github/patches/offline_mode.patch
+
+      - name: Setup Rust Toolchain
+        if: steps.version_check.outputs.should_build == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Launcher
+        if: steps.version_check.outputs.should_build == 'true'
+        working-directory: horizon/launcher
+        env:
+          HORIZON_LAUNCHER_VERSION: ${{ steps.version_check.outputs.version }}
+          HORIZON_LAUNCHER_TAG: ${{ steps.version_check.outputs.tag }}
+        run: |
+          cargo build --release
+
+      - name: Package Windows Binary
+        if: steps.version_check.outputs.should_build == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path horizon/launcher/target/release/horizon-launcher.exe -DestinationPath dist/horizon-launcher-windows-x64.zip
+
+      - name: Publish Release to Fork
+        if: steps.version_check.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version_check.outputs.tag }}
+          name: "Launcher ${{ steps.version_check.outputs.version }} (Offline Patched)"
+          files: dist/horizon-launcher-windows-x64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
