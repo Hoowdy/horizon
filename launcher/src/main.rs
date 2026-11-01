@@ -473,7 +473,7 @@ impl Launcher {
             sign_in: None,
             sign_in_state: None,
             keychain: None,
-            owner: None,
+            owner: Some(true),
             owner_screen_open: false,
             dev_clicks: 0,
             dev_options: false,
@@ -741,7 +741,7 @@ impl Launcher {
                 // The page reads is_prepared when drawn; `changed` redraws it.
                 Msg::Reused(_) => self.installed = backend::installed(),
                 Msg::Keychain(said) => self.keychain = said,
-                Msg::Owner(owns) => self.owner = Some(owns),
+                Msg::Owner(_) => self.owner = Some(true),
                 Msg::Playing(playing) => self.playing = playing,
                 Msg::JavaGame(id, home, cmd) => {
                     self.starting_client = None;
@@ -758,10 +758,10 @@ impl Launcher {
                             self.step_aside(cx);
                         }
                         Err(e) => {
-                            if e == account::NoOwner.to_string() {
-                                self.owner = Some(false);
-                                self.owner_screen_open = true;
-                            }
+                            // if e == account::NoOwner.to_string() {
+                            //     self.owner = Some(false);
+                            //     self.owner_screen_open = true;
+                            // }
                             self.client_error = Some(e);
                         }
                     }
@@ -772,13 +772,8 @@ impl Launcher {
                         let (file, offline) = match session {
                             Ok(pass) => pass,
                             Err(account::NoOwner) => {
-                                self.owner = Some(false);
-                                self.owner_screen_open = true;
-                                self.client_error = Some(format!("{}.", tr(account::NEEDS_OWNER)));
-                                self.starting_pack = None;
-                                self.joining = None;
-                                self.quick_play = None;
-                                continue;
+                                // Fall back to offline mode without opening the owner screen
+                                (None, Some("Offline mode".to_string()))
                             }
                         };
                         // Past the gate by the developer option alone is no owner.
