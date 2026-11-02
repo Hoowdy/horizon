@@ -68,7 +68,8 @@ jobs:
         working-directory: horizon
         shell: bash
         run: |
-          git apply ../automation/.github/patches/offline_mode.patch
+          git apply --reject --whitespace=fix -C1 ../automation/.github/patches/offline_mode.patch
+
 
       - name: Setup Rust Toolchain
         if: steps.version_check.outputs.should_build == 'true'
